@@ -1,5 +1,6 @@
 import time
 import functools
+import inspect
 import logging
 import asyncio
 from collections import defaultdict
@@ -243,7 +244,7 @@ def validate_input(**validators: Callable[[Any], bool]) -> Callable:
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            func_sig = functools.signature(func)
+            func_sig = inspect.signature(func)
             bound_args = func_sig.bind(*args, **kwargs)
             bound_args.apply_defaults()
             

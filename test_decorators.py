@@ -247,12 +247,12 @@ def test_circuit_breaker_opens_after_threshold():
 
 
 def test_circuit_breaker_recovery():
-    success_count = [0]
+    call_count = [0]
     
     @circuit_breaker(failure_threshold=2, recovery_timeout=0.3)
     def flaky_function():
-        if success_count[0] < 3:
-            success_count[0] += 1
+        call_count[0] += 1
+        if call_count[0] <= 2:
             raise ConnectionError("Temporary failure")
         return "success"
     
@@ -269,4 +269,5 @@ def test_circuit_breaker_recovery():
     
     result = flaky_function()
     assert result == "success"
+    assert call_count[0] == 3
 
