@@ -1,6 +1,8 @@
 # Python API Middleware Decorators
 
-A comprehensive demonstration of the **Decorator Pattern** in Python, showcasing how to dynamically wrap function behavior using composition to add cross-cutting concerns transparently. This project includes production-ready decorators with error handling, parameterized decorators, and a complete FastAPI example.
+An educational demonstration of the **Decorator Pattern** in Python: how to wrap function behavior through composition so cross-cutting concerns can be added transparently. It implements a handful of decorators (timing, logging, retry, cache, rate limiting, validation, circuit breaker), a FastAPI example that uses them, and a test suite.
+
+This is a teaching example, not a library you should install and put in front of traffic. See [Limitations](#limitations) for exactly where it stops.
 
 ## Overview
 
@@ -33,14 +35,43 @@ The Decorator Pattern allows behavior to be added to individual objects dynamica
 
 ### Additional Features
 
-- **Error Handling**: All decorators include proper exception handling
-- **Type Hints**: Complete type annotations for better code quality
+- **Error Handling**: Every decorator propagates exceptions instead of swallowing them
+- **Typed Exceptions**: `RateLimitExceeded` and `CircuitBreakerOpen` so callers can catch precisely
+- **Type Hints**: Type annotations throughout
 - **Documentation**: Google-style docstrings for all decorators
-- **Logging**: Professional logging using Python's logging module
-- **FastAPI Integration**: Complete API example demonstrating real-world usage
-- **Unit Tests**: Comprehensive test suite with pytest (20+ tests)
+- **Logging**: Uses Python's `logging` module rather than `print`
+- **FastAPI Integration**: API example showing the decorators in a web handler
+- **Unit Tests**: Test suite with pytest (27 tests)
 - **CI/CD**: GitHub Actions workflow for automated testing
-- **Production Ready**: Follows SOLID principles and best practices
+
+## Limitations
+
+These are deliberate. The goal here is a readable illustration of the pattern, and the
+list below is the honest gap between that and something you would deploy:
+
+- **Not thread-safe.** `cache`, `rate_limit` and `circuit_breaker` read and mutate their
+  state without any locking. This is not hypothetical in `api_example.py`: FastAPI runs
+  `def` (non-`async def`) endpoints in a thread pool, so `/users/{user_id}` and
+  `/products/{product_id}` are already executing concurrently across worker threads.
+  Under load you can get duplicate cache misses, a rate limiter that lets more calls
+  through than `max_calls`, and lost circuit-breaker failure counts.
+- **The cache is unbounded.** There is no maximum size and no eviction policy. Expired
+  entries are only removed when that exact key is requested again, so a function called
+  with many distinct arguments grows the cache forever.
+- **Cache backend is not pluggable.** Results live in a plain dict in the decorator's
+  closure. There is no interface to swap in Redis or Memcached.
+- **State is per-process and per-decoration.** Each `@rate_limit`/`@circuit_breaker`
+  application owns its own counters. Run two workers and each enforces its own budget,
+  so a `max_calls=5` limit admits 10 calls across two processes.
+- **Only `timing` has an async variant.** `retry`, `cache`, `rate_limit` and
+  `circuit_breaker` are synchronous. Applying them to an `async def` function wraps the
+  coroutine object, not its result — `@cache` on an `async def` will cache a coroutine
+  and hand back an already-awaited one on the next hit.
+- **`cache` requires hashable-reprs, not hashable args.** The cache key is built with
+  `str(args)`, so two different objects with the same `repr` collide, and objects with
+  default `repr` (containing their `id`) never hit the cache.
+- **No benchmarks.** Nothing here has been measured. Do not assume the caching or
+  circuit-breaking overhead is negligible.
 
 ## Project Structure
 
@@ -48,7 +79,7 @@ The Decorator Pattern allows behavior to be added to individual objects dynamica
 python-api-middleware-decorators/
 ├── decorators.py              # All decorator implementations
 ├── api_example.py            # FastAPI example with decorators
-├── test_decorators.py        # Comprehensive unit tests
+├── test_decorators.py        # Unit tests
 ├── pytest.ini               # Pytest configuration
 ├── requirements.txt          # Project dependencies
 ├── .gitignore               # Git ignore rules
@@ -167,7 +198,7 @@ uvicorn api_example:app --reload
 The API will be available at `http://localhost:8000` with endpoints:
 
 - `GET /users/{user_id}` - Cached user data with timing and logging
-- `GET /products/{product_id}` - Rate-limited product endpoint
+- `GET /products/{product_id}` - Rate-limited product endpoint (returns `429` once the budget is spent)
 - `GET /orders/{order_id}` - Retry-enabled order endpoint
 - `POST /process` - Input validation example
 
@@ -193,11 +224,12 @@ Run async tests:
 pytest -v test_decorators.py::test_async_timing_decorator
 ```
 
-The project includes 20+ unit tests covering:
+The project includes 27 unit tests covering:
 - All decorator functionalities
 - Error handling scenarios
 - Async function support
-- Circuit breaker state transitions
+- Circuit breaker state transitions, including the HALF_OPEN probe
+- State isolation between separate decorator applications
 - Decorator composition
 
 ## Implementation Details
@@ -229,9 +261,15 @@ All decorators include proper error handling:
 
 - **Timing Decorator**: Captures execution time even when exceptions occur
 - **Logging Decorator**: Logs exceptions before re-raising them
-- **Retry Decorator**: Only retries specified exception types
-- **Rate Limit Decorator**: Raises descriptive exceptions when limits are exceeded
+- **Retry Decorator**: Only retries specified exception types; rejects `max_attempts < 1` at decoration time
+- **Rate Limit Decorator**: Raises `RateLimitExceeded` when the budget is spent
+- **Circuit Breaker**: Raises `CircuitBreakerOpen` while the circuit is open
 - **Validation Decorator**: Raises `ValueError` with descriptive messages
+
+Note that `retry(exceptions=(Exception,))` — the default — will happily retry a
+`RateLimitExceeded` or `CircuitBreakerOpen`, defeating the decorator underneath it.
+When stacking `@retry` over either, pass the specific exceptions you mean to recover
+from.
 
 ### Key Design Principles
 
@@ -272,6 +310,9 @@ Limits function call frequency.
 - `max_calls`: Maximum number of calls allowed
 - `period_seconds`: Time window in seconds
 
+Raises `RateLimitExceeded`. Each application of the decorator keeps its own call
+history; two decorated functions never share a budget.
+
 ### `@validate_input(**validators)`
 
 Validates function arguments before execution.
@@ -290,6 +331,10 @@ Implements circuit breaker pattern to prevent cascading failures.
 - `recovery_timeout`: Time in seconds before attempting to close the circuit
 - `exceptions`: Tuple of exception types that count as failures
 
+Raises `CircuitBreakerOpen` while the circuit is open. After `recovery_timeout` the
+circuit moves to HALF_OPEN and needs `HALF_OPEN_SUCCESSES_TO_CLOSE` (2) consecutive
+successes to close. Each application of the decorator keeps its own state.
+
 ## CI/CD
 
 The project includes a GitHub Actions workflow that:
@@ -307,18 +352,21 @@ Workflow runs automatically on push and pull requests.
 
 ## Purpose
 
-This project demonstrates:
+This project is a worked example of:
 
-- **Pattern Mastery**: Deep understanding of the Decorator Pattern
-- **Production Skills**: Error handling, testing, and real-world integration
-- **Code Quality**: SOLID principles, type hints, docstrings, and best practices
-- **Async Support**: Handling both sync and async functions
-- **Advanced Patterns**: Circuit breaker implementation
-- **Framework Integration**: Practical FastAPI example
-- **Testing**: Comprehensive unit test coverage (20+ tests)
-- **DevOps**: CI/CD pipeline with GitHub Actions
+- **The Decorator Pattern**: composition instead of inheritance to add behavior
+- **Parameterized decorators**: the three-level `decorator factory -> decorator -> wrapper` shape, and where per-decoration state belongs (the closure, not a module global)
+- **Common resilience patterns**: retry with backoff, TTL caching, rate limiting, circuit breaking — implemented plainly enough to read in one sitting
+- **Stacking order**: what changes when you reorder decorators
+- **Testing decorators**: including state isolation and circuit-breaker state transitions
+- **Framework integration**: the same decorators applied to FastAPI handlers
 
 This pattern is fundamental in frameworks like Flask, Django, and FastAPI, where decorators are used extensively for routing, authentication, caching, and other cross-cutting concerns.
+
+If you need these behaviors in a real service, reach for a maintained library —
+`tenacity` for retries, `cachetools` for caching, `limits` or `slowapi` for rate
+limiting, `pybreaker` for circuit breaking — all of which handle the concerns listed
+under [Limitations](#limitations).
 
 ## License
 

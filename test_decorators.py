@@ -9,7 +9,9 @@ from decorators import (
     cache,
     rate_limit,
     validate_input,
-    circuit_breaker
+    circuit_breaker,
+    RateLimitExceeded,
+    CircuitBreakerOpen
 )
 
 
@@ -271,3 +273,117 @@ def test_circuit_breaker_recovery():
     assert result == "success"
     assert call_count[0] == 3
 
+
+
+def test_rate_limit_raises_typed_exception():
+    @rate_limit(max_calls=1, period_seconds=1)
+    def limited_function():
+        return "success"
+
+    limited_function()
+
+    with pytest.raises(RateLimitExceeded):
+        limited_function()
+
+
+def test_rate_limit_state_is_isolated_per_decoration():
+    @rate_limit(max_calls=1, period_seconds=1)
+    def first_function():
+        return "first"
+
+    @rate_limit(max_calls=1, period_seconds=1)
+    def second_function():
+        return "second"
+
+    first_function()
+
+    with pytest.raises(RateLimitExceeded):
+        first_function()
+
+    assert second_function() == "second"
+
+
+def test_rate_limit_same_function_decorated_twice_is_isolated():
+    def endpoint():
+        return "ok"
+
+    limited_a = rate_limit(max_calls=1, period_seconds=1)(endpoint)
+    limited_b = rate_limit(max_calls=1, period_seconds=1)(endpoint)
+
+    limited_a()
+
+    with pytest.raises(RateLimitExceeded):
+        limited_a()
+
+    assert limited_b() == "ok"
+
+
+def test_circuit_breaker_raises_typed_exception():
+    @circuit_breaker(failure_threshold=1, recovery_timeout=10)
+    def failing_function():
+        raise ConnectionError("Connection failed")
+
+    with pytest.raises(ConnectionError):
+        failing_function()
+
+    with pytest.raises(CircuitBreakerOpen):
+        failing_function()
+
+
+def test_circuit_breaker_state_is_isolated_per_decoration():
+    @circuit_breaker(failure_threshold=1, recovery_timeout=10)
+    def failing_function():
+        raise ConnectionError("Connection failed")
+
+    @circuit_breaker(failure_threshold=1, recovery_timeout=10)
+    def healthy_function():
+        return "healthy"
+
+    with pytest.raises(ConnectionError):
+        failing_function()
+
+    with pytest.raises(CircuitBreakerOpen):
+        failing_function()
+
+    assert healthy_function() == "healthy"
+
+
+def test_circuit_breaker_half_open_counts_first_success():
+    fail = [True]
+
+    @circuit_breaker(failure_threshold=2, recovery_timeout=0.2)
+    def flaky_function():
+        if fail[0]:
+            raise ConnectionError("Temporary failure")
+        return "success"
+
+    for _ in range(2):
+        with pytest.raises(ConnectionError):
+            flaky_function()
+
+    with pytest.raises(CircuitBreakerOpen):
+        flaky_function()
+
+    time.sleep(0.25)
+    fail[0] = False
+
+    # Two successes must close the circuit: the first one happens on the same
+    # call that transitions OPEN -> HALF_OPEN and has to be counted.
+    assert flaky_function() == "success"
+    assert flaky_function() == "success"
+
+    # Circuit is CLOSED now, so a single failure must not reopen it.
+    fail[0] = True
+    with pytest.raises(ConnectionError):
+        flaky_function()
+
+    fail[0] = False
+    assert flaky_function() == "success"
+
+
+def test_retry_rejects_non_positive_max_attempts():
+    with pytest.raises(ValueError):
+        retry(max_attempts=0)
+
+    with pytest.raises(ValueError):
+        retry(max_attempts=-1)

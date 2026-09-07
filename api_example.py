@@ -1,15 +1,22 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from decorators import (
     timing_decorator,
     logging_decorator,
     cache,
     rate_limit,
     validate_input,
-    retry
+    retry,
+    RateLimitExceeded
 )
 import time
 
 app = FastAPI(title="API Example with Decorators")
+
+
+@app.exception_handler(RateLimitExceeded)
+def handle_rate_limit_exceeded(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    return JSONResponse(status_code=429, content={"detail": str(exc)})
 
 
 @app.get("/")

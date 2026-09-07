@@ -3,7 +3,6 @@ import functools
 import inspect
 import logging
 import asyncio
-from collections import defaultdict
 from typing import Callable, Any, Dict, List, Tuple, Type, Union
 from enum import Enum
 
@@ -14,6 +13,14 @@ class CircuitState(Enum):
     CLOSED = "closed"
     OPEN = "open"
     HALF_OPEN = "half_open"
+
+
+class RateLimitExceeded(Exception):
+    """Raised when a rate-limited function exceeds its allowed call budget."""
+
+
+class CircuitBreakerOpen(Exception):
+    """Raised when a call is rejected because the circuit breaker is open."""
 
 
 def timing_decorator(func: Callable) -> Callable:
@@ -124,7 +131,13 @@ def retry(max_attempts: int = 3, delay: float = 1, backoff: float = 2,
         >>> @retry(max_attempts=3, delay=1, exceptions=(ConnectionError,))
         ... def unreliable_function():
         ...     raise ConnectionError("Connection failed")
+
+    Raises:
+        ValueError: If max_attempts is less than 1.
     """
+    if max_attempts < 1:
+        raise ValueError(f"max_attempts debe ser al menos 1, se recibió: {max_attempts}")
+
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -188,9 +201,6 @@ def cache(ttl_seconds: int = 60) -> Callable:
     return decorator
 
 
-_rate_limit_storage: Dict[int, List[float]] = defaultdict(list)
-
-
 def rate_limit(max_calls: int = 5, period_seconds: int = 60) -> Callable:
     """Decorator that limits function call frequency.
     
@@ -201,25 +211,29 @@ def rate_limit(max_calls: int = 5, period_seconds: int = 60) -> Callable:
     Returns:
         Decorator function.
         
+    Raises:
+        RateLimitExceeded: At call time, when the budget for the current
+            window is exhausted.
+        
     Example:
         >>> @rate_limit(max_calls=5, period_seconds=60)
         ... def api_endpoint():
         ...     return {"data": "response"}
     """
     def decorator(func: Callable) -> Callable:
+        call_history: List[float] = []
+        
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            func_id = id(func)
             current_time = time.time()
             
-            call_history = _rate_limit_storage[func_id]
             call_history[:] = [t for t in call_history if current_time - t < period_seconds]
             
             if len(call_history) >= max_calls:
                 wait_time = period_seconds - (current_time - call_history[0])
                 error_msg = f"Rate limit excedido para {func.__name__}. Espera {wait_time:.2f} segundos"
                 logger.warning(error_msg)
-                raise Exception(error_msg)
+                raise RateLimitExceeded(error_msg)
             
             call_history.append(current_time)
             return func(*args, **kwargs)
@@ -261,12 +275,16 @@ def validate_input(**validators: Callable[[Any], bool]) -> Callable:
     return decorator
 
 
-_circuit_breaker_storage: Dict[int, Dict[str, Any]] = defaultdict(dict)
+HALF_OPEN_SUCCESSES_TO_CLOSE = 2
 
 
 def circuit_breaker(failure_threshold: int = 5, recovery_timeout: int = 60, 
                      exceptions: Tuple[Type[Exception], ...] = (Exception,)) -> Callable:
     """Decorator that implements circuit breaker pattern to prevent cascading failures.
+    
+    After recovery_timeout the circuit moves to HALF_OPEN and needs
+    HALF_OPEN_SUCCESSES_TO_CLOSE consecutive successes to close again. Any
+    failure while HALF_OPEN reopens it once failure_threshold is reached.
     
     Args:
         failure_threshold: Number of failures before opening the circuit.
@@ -276,25 +294,28 @@ def circuit_breaker(failure_threshold: int = 5, recovery_timeout: int = 60,
     Returns:
         Decorator function.
         
+    Raises:
+        CircuitBreakerOpen: At call time, when the circuit is open and the
+            recovery timeout has not elapsed yet.
+        
     Example:
         >>> @circuit_breaker(failure_threshold=5, recovery_timeout=60)
         ... def external_service():
         ...     return "response"
     """
     def decorator(func: Callable) -> Callable:
-        func_id = id(func)
-        storage = _circuit_breaker_storage[func_id]
-        storage.setdefault('state', CircuitState.CLOSED)
-        storage.setdefault('failure_count', 0)
-        storage.setdefault('last_failure_time', 0)
-        storage.setdefault('success_count', 0)
+        storage: Dict[str, Any] = {
+            'state': CircuitState.CLOSED,
+            'failure_count': 0,
+            'last_failure_time': 0.0,
+            'success_count': 0,
+        }
         
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             current_time = time.time()
-            state = storage['state']
             
-            if state == CircuitState.OPEN:
+            if storage['state'] == CircuitState.OPEN:
                 if current_time - storage['last_failure_time'] >= recovery_timeout:
                     storage['state'] = CircuitState.HALF_OPEN
                     storage['success_count'] = 0
@@ -303,14 +324,18 @@ def circuit_breaker(failure_threshold: int = 5, recovery_timeout: int = 60,
                     wait_time = recovery_timeout - (current_time - storage['last_failure_time'])
                     error_msg = f"Circuit breaker abierto para {func.__name__}. Espera {wait_time:.2f} segundos"
                     logger.warning(error_msg)
-                    raise Exception(error_msg)
+                    raise CircuitBreakerOpen(error_msg)
+            
+            # Read the state after the possible OPEN -> HALF_OPEN transition, so
+            # the success that triggers the transition is counted as a probe.
+            state = storage['state']
             
             try:
                 result = func(*args, **kwargs)
                 
                 if state == CircuitState.HALF_OPEN:
                     storage['success_count'] += 1
-                    if storage['success_count'] >= 2:
+                    if storage['success_count'] >= HALF_OPEN_SUCCESSES_TO_CLOSE:
                         storage['state'] = CircuitState.CLOSED
                         storage['failure_count'] = 0
                         logger.info(f"Circuit breaker para {func.__name__} cerrado exitosamente")
@@ -348,7 +373,7 @@ def expensive_operation(n: int) -> int:
     return sum(range(n))
 
 
-@retry(max_attempts=3, delay=0.5)
+@retry(max_attempts=3, delay=0.5, exceptions=(ConnectionError,))
 @rate_limit(max_calls=3, period_seconds=10)
 def unreliable_service() -> str:
     import random
