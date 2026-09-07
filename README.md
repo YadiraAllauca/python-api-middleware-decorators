@@ -36,12 +36,12 @@ The Decorator Pattern allows behavior to be added to individual objects dynamica
 ### Additional Features
 
 - **Error Handling**: Every decorator propagates exceptions instead of swallowing them
-- **Typed Exceptions**: `RateLimitExceeded` and `CircuitBreakerOpen` so callers can catch precisely
+- **Typed Exceptions**: `RateLimitExceeded` and `CircuitBreakerOpen`, both deriving from `DecoratorError`, so callers can catch precisely or broadly
 - **Type Hints**: Type annotations throughout
 - **Documentation**: Google-style docstrings for all decorators
 - **Logging**: Uses Python's `logging` module rather than `print`
 - **FastAPI Integration**: API example showing the decorators in a web handler
-- **Unit Tests**: Test suite with pytest (27 tests)
+- **Unit Tests**: Test suite with pytest (30 tests)
 - **CI/CD**: GitHub Actions workflow for automated testing
 
 ## Limitations
@@ -105,7 +105,7 @@ from decorators import timing_decorator, logging_decorator
 @timing_decorator
 @logging_decorator
 def get_user_data(user_id):
-    return {"user_id": user_id, "name": f"Usuario {user_id}"}
+    return {"user_id": user_id, "name": f"User {user_id}"}
 ```
 
 ### Running the Basic Example
@@ -224,12 +224,13 @@ Run async tests:
 pytest -v test_decorators.py::test_async_timing_decorator
 ```
 
-The project includes 27 unit tests covering:
+The project includes 30 unit tests covering:
 - All decorator functionalities
 - Error handling scenarios
 - Async function support
 - Circuit breaker state transitions, including the HALF_OPEN probe
 - State isolation between separate decorator applications
+- The `DecoratorError` exception hierarchy
 - Decorator composition
 
 ## Implementation Details
@@ -266,6 +267,8 @@ All decorators include proper error handling:
 - **Circuit Breaker**: Raises `CircuitBreakerOpen` while the circuit is open
 - **Validation Decorator**: Raises `ValueError` with descriptive messages
 
+Both rejection types derive from `DecoratorError` — see [Exceptions](#exceptions).
+
 Note that `retry(exceptions=(Exception,))` — the default — will happily retry a
 `RateLimitExceeded` or `CircuitBreakerOpen`, defeating the decorator underneath it.
 When stacking `@retry` over either, pass the specific exceptions you mean to recover
@@ -277,6 +280,34 @@ from.
 - **Open/Closed Principle**: Functions are open for extension (via decorators) but closed for modification
 - **Composition over Inheritance**: Behavior is added through composition, not class hierarchies
 - **Separation of Concerns**: Cross-cutting concerns are isolated in decorators
+
+## Exceptions
+
+```
+DecoratorError            # base for anything the decorators themselves reject
+├── RateLimitExceeded     # raised by @rate_limit
+└── CircuitBreakerOpen    # raised by @circuit_breaker
+```
+
+`DecoratorError` lets a caller distinguish "the decorator refused to run this" from
+"the wrapped function failed":
+
+```python
+from decorators import DecoratorError
+
+try:
+    result = call_downstream()
+except DecoratorError:
+    # Rejected before the function ran: shed load, return 429/503, use a fallback.
+    result = cached_fallback()
+except ConnectionError:
+    # The function actually ran and failed.
+    raise
+```
+
+`@validate_input` raises the builtin `ValueError`, and `retry(max_attempts=0)` raises
+`ValueError` at decoration time; neither is a `DecoratorError`, since neither
+represents a decorator rejecting a call at runtime.
 
 ## Decorator Reference
 

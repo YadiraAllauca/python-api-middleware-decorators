@@ -3,7 +3,7 @@ import functools
 import inspect
 import logging
 import asyncio
-from typing import Callable, Any, Dict, List, Tuple, Type, Union
+from typing import Callable, Any, Dict, List, Tuple, Type
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -15,11 +15,19 @@ class CircuitState(Enum):
     HALF_OPEN = "half_open"
 
 
-class RateLimitExceeded(Exception):
+class DecoratorError(Exception):
+    """Base class for errors raised by the decorators in this module.
+
+    Catch this to handle any decorator-originated rejection without also
+    catching errors raised by the wrapped function itself.
+    """
+
+
+class RateLimitExceeded(DecoratorError):
     """Raised when a rate-limited function exceeds its allowed call budget."""
 
 
-class CircuitBreakerOpen(Exception):
+class CircuitBreakerOpen(DecoratorError):
     """Raised when a call is rejected because the circuit breaker is open."""
 
 
@@ -45,12 +53,12 @@ def timing_decorator(func: Callable) -> Callable:
             result = func(*args, **kwargs)
             end_time = time.time()
             execution_time = end_time - start_time
-            logger.info(f"Tiempo de ejecución de {func.__name__}: {execution_time:.4f} segundos")
+            logger.info(f"{func.__name__} executed in {execution_time:.4f}s")
             return result
         except Exception as e:
             end_time = time.time()
             execution_time = end_time - start_time
-            logger.error(f"Error en {func.__name__} después de {execution_time:.4f} segundos: {e}")
+            logger.error(f"{func.__name__} failed after {execution_time:.4f}s: {e}")
             raise
     return wrapper
 
@@ -77,12 +85,12 @@ def async_timing_decorator(func: Callable) -> Callable:
             result = await func(*args, **kwargs)
             end_time = time.time()
             execution_time = end_time - start_time
-            logger.info(f"Tiempo de ejecución de {func.__name__}: {execution_time:.4f} segundos")
+            logger.info(f"{func.__name__} executed in {execution_time:.4f}s")
             return result
         except Exception as e:
             end_time = time.time()
             execution_time = end_time - start_time
-            logger.error(f"Error en {func.__name__} después de {execution_time:.4f} segundos: {e}")
+            logger.error(f"{func.__name__} failed after {execution_time:.4f}s: {e}")
             raise
     return wrapper
 
@@ -103,13 +111,13 @@ def logging_decorator(func: Callable) -> Callable:
     """
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        logger.info(f"Llamando a {func.__name__} con argumentos: args={args}, kwargs={kwargs}")
+        logger.info(f"Calling {func.__name__} with args={args}, kwargs={kwargs}")
         try:
             result = func(*args, **kwargs)
-            logger.info(f"Resultado de {func.__name__}: {result}")
+            logger.info(f"{func.__name__} returned: {result}")
             return result
         except Exception as e:
-            logger.error(f"Error en {func.__name__}: {e}")
+            logger.error(f"{func.__name__} raised: {e}")
             raise
     return wrapper
 
@@ -136,7 +144,7 @@ def retry(max_attempts: int = 3, delay: float = 1, backoff: float = 2,
         ValueError: If max_attempts is less than 1.
     """
     if max_attempts < 1:
-        raise ValueError(f"max_attempts debe ser al menos 1, se recibió: {max_attempts}")
+        raise ValueError(f"max_attempts must be at least 1, got: {max_attempts}")
 
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
@@ -150,11 +158,11 @@ def retry(max_attempts: int = 3, delay: float = 1, backoff: float = 2,
                 except exceptions as e:
                     last_exception = e
                     if attempt < max_attempts:
-                        logger.warning(f"Intento {attempt} fallido para {func.__name__}. Reintentando en {current_delay}s...")
+                        logger.warning(f"Attempt {attempt} failed for {func.__name__}. Retrying in {current_delay}s...")
                         time.sleep(current_delay)
                         current_delay *= backoff
                     else:
-                        logger.error(f"Todos los intentos fallaron para {func.__name__}")
+                        logger.error(f"All {max_attempts} attempts failed for {func.__name__}")
             
             raise last_exception
         return wrapper
@@ -186,7 +194,7 @@ def cache(ttl_seconds: int = 60) -> Callable:
             
             if cache_key in cache_store:
                 if current_time - cache_timestamps[cache_key] < ttl_seconds:
-                    logger.debug(f"Cache hit para {func.__name__}")
+                    logger.debug(f"Cache hit for {func.__name__}")
                     return cache_store[cache_key]
                 else:
                     del cache_store[cache_key]
@@ -195,7 +203,7 @@ def cache(ttl_seconds: int = 60) -> Callable:
             result = func(*args, **kwargs)
             cache_store[cache_key] = result
             cache_timestamps[cache_key] = current_time
-            logger.debug(f"Cache miss para {func.__name__}, resultado almacenado")
+            logger.debug(f"Cache miss for {func.__name__}, result stored")
             return result
         return wrapper
     return decorator
@@ -231,7 +239,7 @@ def rate_limit(max_calls: int = 5, period_seconds: int = 60) -> Callable:
             
             if len(call_history) >= max_calls:
                 wait_time = period_seconds - (current_time - call_history[0])
-                error_msg = f"Rate limit excedido para {func.__name__}. Espera {wait_time:.2f} segundos"
+                error_msg = f"Rate limit exceeded for {func.__name__}. Retry in {wait_time:.2f}s"
                 logger.warning(error_msg)
                 raise RateLimitExceeded(error_msg)
             
@@ -266,7 +274,7 @@ def validate_input(**validators: Callable[[Any], bool]) -> Callable:
                 if param_name in bound_args.arguments:
                     value = bound_args.arguments[param_name]
                     if not validator_func(value):
-                        error_msg = f"Validación fallida para parámetro '{param_name}' con valor: {value}"
+                        error_msg = f"Validation failed for parameter '{param_name}' with value: {value}"
                         logger.error(error_msg)
                         raise ValueError(error_msg)
             
@@ -319,10 +327,10 @@ def circuit_breaker(failure_threshold: int = 5, recovery_timeout: int = 60,
                 if current_time - storage['last_failure_time'] >= recovery_timeout:
                     storage['state'] = CircuitState.HALF_OPEN
                     storage['success_count'] = 0
-                    logger.info(f"Circuit breaker para {func.__name__} en estado HALF_OPEN")
+                    logger.info(f"Circuit breaker for {func.__name__} is now HALF_OPEN")
                 else:
                     wait_time = recovery_timeout - (current_time - storage['last_failure_time'])
-                    error_msg = f"Circuit breaker abierto para {func.__name__}. Espera {wait_time:.2f} segundos"
+                    error_msg = f"Circuit breaker is open for {func.__name__}. Retry in {wait_time:.2f}s"
                     logger.warning(error_msg)
                     raise CircuitBreakerOpen(error_msg)
             
@@ -338,7 +346,7 @@ def circuit_breaker(failure_threshold: int = 5, recovery_timeout: int = 60,
                     if storage['success_count'] >= HALF_OPEN_SUCCESSES_TO_CLOSE:
                         storage['state'] = CircuitState.CLOSED
                         storage['failure_count'] = 0
-                        logger.info(f"Circuit breaker para {func.__name__} cerrado exitosamente")
+                        logger.info(f"Circuit breaker for {func.__name__} closed after successful probes")
                 
                 if state == CircuitState.CLOSED:
                     storage['failure_count'] = 0
@@ -351,7 +359,7 @@ def circuit_breaker(failure_threshold: int = 5, recovery_timeout: int = 60,
                 
                 if storage['failure_count'] >= failure_threshold:
                     storage['state'] = CircuitState.OPEN
-                    logger.error(f"Circuit breaker abierto para {func.__name__} después de {failure_threshold} fallos")
+                    logger.error(f"Circuit breaker opened for {func.__name__} after {failure_threshold} failures")
                 
                 raise
         
@@ -363,7 +371,7 @@ def circuit_breaker(failure_threshold: int = 5, recovery_timeout: int = 60,
 @logging_decorator
 def get_user_data(user_id: int) -> Dict[str, Any]:
     time.sleep(0.1)
-    return {"user_id": user_id, "name": f"Usuario {user_id}", "email": f"user{user_id}@example.com"}
+    return {"user_id": user_id, "name": f"User {user_id}", "email": f"user{user_id}@example.com"}
 
 
 @cache(ttl_seconds=30)
@@ -378,42 +386,42 @@ def expensive_operation(n: int) -> int:
 def unreliable_service() -> str:
     import random
     if random.random() < 0.7:
-        raise ConnectionError("Error de conexión simulado")
-    return "Servicio exitoso"
+        raise ConnectionError("Simulated connection error")
+    return "Service call succeeded"
 
 
 @validate_input(user_id=lambda x: isinstance(x, int) and x > 0)
 def get_user_by_id(user_id: int) -> Dict[str, Any]:
-    return {"user_id": user_id, "name": f"Usuario {user_id}"}
+    return {"user_id": user_id, "name": f"User {user_id}"}
 
 
 @async_timing_decorator
 async def async_get_user_data(user_id: int) -> Dict[str, Any]:
     await asyncio.sleep(0.1)
-    return {"user_id": user_id, "name": f"Usuario {user_id}", "email": f"user{user_id}@example.com"}
+    return {"user_id": user_id, "name": f"User {user_id}", "email": f"user{user_id}@example.com"}
 
 
 @circuit_breaker(failure_threshold=3, recovery_timeout=10)
 def external_api_call() -> str:
     import random
     if random.random() < 0.6:
-        raise ConnectionError("API no disponible")
+        raise ConnectionError("API unavailable")
     return "API response"
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
-    print("=== Ejemplo básico ===")
+    print("=== Basic example ===")
     result = get_user_data(123)
-    print(f"\nResultado final: {result}\n")
+    print(f"\nFinal result: {result}\n")
     
-    print("=== Ejemplo con cache ===")
+    print("=== Cache example ===")
     print(expensive_operation(1000000))
     print(expensive_operation(1000000))
     print()
     
-    print("=== Ejemplo con retry ===")
+    print("=== Retry example ===")
     for i in range(2):
         try:
             print(unreliable_service())
@@ -421,22 +429,22 @@ if __name__ == "__main__":
             print(f"Error: {e}")
     print()
     
-    print("=== Ejemplo con validación ===")
+    print("=== Validation example ===")
     try:
         print(get_user_by_id(456))
         print(get_user_by_id(-1))
     except ValueError as e:
-        print(f"Error de validación: {e}")
+        print(f"Validation error: {e}")
     print()
     
-    print("=== Ejemplo async ===")
+    print("=== Async example ===")
     async def run_async_example():
         result = await async_get_user_data(789)
-        print(f"Resultado async: {result}")
+        print(f"Async result: {result}")
     asyncio.run(run_async_example())
     print()
     
-    print("=== Ejemplo circuit breaker ===")
+    print("=== Circuit breaker example ===")
     for i in range(5):
         try:
             print(external_api_call())

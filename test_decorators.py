@@ -10,6 +10,7 @@ from decorators import (
     rate_limit,
     validate_input,
     circuit_breaker,
+    DecoratorError,
     RateLimitExceeded,
     CircuitBreakerOpen
 )
@@ -143,7 +144,7 @@ def test_validate_input_decorator():
     
     with pytest.raises(ValueError) as exc_info:
         validated_function(-1)
-    assert "Validación fallida" in str(exc_info.value)
+    assert "Validation failed" in str(exc_info.value)
 
 
 def test_validate_input_with_kwargs():
@@ -245,7 +246,7 @@ def test_circuit_breaker_opens_after_threshold():
     
     with pytest.raises(Exception) as exc_info:
         failing_function()
-    assert "Circuit breaker abierto" in str(exc_info.value)
+    assert "Circuit breaker is open" in str(exc_info.value)
 
 
 def test_circuit_breaker_recovery():
@@ -387,3 +388,39 @@ def test_retry_rejects_non_positive_max_attempts():
 
     with pytest.raises(ValueError):
         retry(max_attempts=-1)
+
+
+def test_decorator_errors_share_a_common_base():
+    assert issubclass(RateLimitExceeded, DecoratorError)
+    assert issubclass(CircuitBreakerOpen, DecoratorError)
+
+
+def test_decorator_error_catches_rate_limit_and_circuit_breaker():
+    @rate_limit(max_calls=1, period_seconds=1)
+    def limited_function():
+        return "success"
+
+    @circuit_breaker(failure_threshold=1, recovery_timeout=10)
+    def failing_function():
+        raise ConnectionError("Connection failed")
+
+    limited_function()
+    with pytest.raises(DecoratorError):
+        limited_function()
+
+    with pytest.raises(ConnectionError):
+        failing_function()
+    with pytest.raises(DecoratorError):
+        failing_function()
+
+
+def test_decorator_error_does_not_catch_wrapped_function_errors():
+    @circuit_breaker(failure_threshold=5, recovery_timeout=10)
+    def failing_function():
+        raise ConnectionError("Connection failed")
+
+    # The wrapped function's own error must propagate untouched, not as a
+    # DecoratorError -- that is the whole point of the base class.
+    with pytest.raises(ConnectionError):
+        failing_function()
+    assert not isinstance(ConnectionError("x"), DecoratorError)

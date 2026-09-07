@@ -31,10 +31,10 @@ def root():
 def get_user(user_id: int):
     time.sleep(0.1)
     if user_id < 0:
-        raise HTTPException(status_code=400, detail="user_id debe ser positivo")
+        raise HTTPException(status_code=400, detail="user_id must be positive")
     return {
         "user_id": user_id,
-        "name": f"Usuario {user_id}",
+        "name": f"User {user_id}",
         "email": f"user{user_id}@example.com"
     }
 
@@ -46,7 +46,7 @@ def get_product(product_id: int):
     time.sleep(0.05)
     return {
         "product_id": product_id,
-        "name": f"Producto {product_id}",
+        "name": f"Product {product_id}",
         "price": product_id * 10
     }
 
@@ -57,7 +57,7 @@ def get_product(product_id: int):
 def get_order(order_id: int):
     import random
     if random.random() < 0.3:
-        raise HTTPException(status_code=503, detail="Servicio temporalmente no disponible")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
     return {
         "order_id": order_id,
         "status": "completed",
